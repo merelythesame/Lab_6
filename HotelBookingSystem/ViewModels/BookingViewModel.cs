@@ -18,6 +18,11 @@ namespace HotelBookingSystem.ViewModels
         public ObservableCollection<Booking> Bookings { get; set; }
 
         private Booking? _selectedBooking;
+        private int _selectedRoomId;
+        private DateTime? _checkInDate;
+        private DateTime? _checkOutDate;
+        private Guest? _currentGuest;
+
         public DateTime? FilterFrom { get; set; }
         public DateTime? FilterTo { get; set; }
         public int? FilterRoomId { get; set; }
@@ -27,59 +32,32 @@ namespace HotelBookingSystem.ViewModels
         public ICommand ApplyFilterCommand { get; }
         public ICommand BookRoomCommand { get; }
 
-        public ObservableCollection<Room> Rooms { get; set; }
-        private int _selectedRoomId;
         public int SelectedRoomId
         {
             get => _selectedRoomId;
-            set
-            {
-                if (_selectedRoomId != value)
-                {
-                    _selectedRoomId = value;
-                    OnPropertyChanged();
-                }
-            }
+            set => SetProperty(ref _selectedRoomId, value);
         }
 
-        private DateTime? _checkInDate;
         public DateTime? CheckInDate
         {
             get => _checkInDate;
-            set
-            {
-                if (_checkInDate != value)
-                {
-                    _checkInDate = value;
-                    OnPropertyChanged();
-                }
-            }
+            set => SetProperty(ref _checkInDate, value);
         }
 
-        private DateTime? _checkOutDate;
         public DateTime? CheckOutDate
         {
             get => _checkOutDate;
-            set
-            {
-                if (_checkOutDate != value)
-                {
-                    _checkOutDate = value;
-                    OnPropertyChanged();
-                }
-            }
+            set => SetProperty(ref _checkOutDate, value);
         }
 
-
-        private Guest? _currentGuest;
         public Guest? CurrentGuest
         {
             get => _currentGuest;
             set
             {
                 _currentGuest = value;
-                OnPropertyChanged(nameof(CurrentGuest));
-                (BookRoomCommand as RelayCommand)?.RaiseCanExecuteChanged();
+                OnPropertyChanged();
+                RaiseBookRoomCanExecuteChanged();
             }
         }
 
@@ -89,9 +67,8 @@ namespace HotelBookingSystem.ViewModels
             set
             {
                 _selectedBooking = value;
-                OnPropertyChanged(nameof(SelectedBooking));
-                (CancelBookingCommand as RelayCommand)?.RaiseCanExecuteChanged();
-                (EditBookingCommand as RelayCommand)?.RaiseCanExecuteChanged();
+                OnPropertyChanged();
+                RaiseBookingCommandsCanExecuteChanged();
             }
         }
 
@@ -114,7 +91,7 @@ namespace HotelBookingSystem.ViewModels
                     e.PropertyName == nameof(CheckInDate) ||
                     e.PropertyName == nameof(CheckOutDate))
                 {
-                    (BookRoomCommand as RelayCommand)?.RaiseCanExecuteChanged();
+                    RaiseBookRoomCanExecuteChanged();
                 }
             };
         }
@@ -126,41 +103,50 @@ namespace HotelBookingSystem.ViewModels
             var window = new EditBookingWindow(SelectedBooking);
             if (window.ShowDialog() == true)
             {
-                try
-                {
-                    _bookingService.UpdateBooking(window.EditedBooking);
+                TryUpdateBooking(window.EditedBooking);
+            }
+        }
 
-                    var updated = Bookings.FirstOrDefault(b => b.Id == window.EditedBooking.Id);
-                    if (updated != null)
-                    {
-                        updated.RoomId = window.EditedBooking.RoomId;
-                        updated.CheckInDate = window.EditedBooking.CheckInDate;
-                        updated.CheckOutDate = window.EditedBooking.CheckOutDate;
-                    }
+        private void TryUpdateBooking(Booking updatedBooking)
+        {
+            try
+            {
+                _bookingService.UpdateBooking(updatedBooking);
+                UpdateBookingInList(updatedBooking);
+                _logger.LogInfo($"Booking {updatedBooking.Id} updated.");
+            }
+            catch (Exception ex)
+            {
+                ShowError(ex.Message, "Edit Error");
+            }
+        }
 
-                    _logger.LogInfo($"Booking {window.EditedBooking.Id} updated.");
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show(ex.Message, "Edit Error");
-                }
+        private void UpdateBookingInList(Booking updatedBooking)
+        {
+            var existing = Bookings.FirstOrDefault(b => b.Id == updatedBooking.Id);
+            if (existing != null)
+            {
+                existing.RoomId = updatedBooking.RoomId;
+                existing.CheckInDate = updatedBooking.CheckInDate;
+                existing.CheckOutDate = updatedBooking.CheckOutDate;
             }
         }
 
         private void CancelBooking()
         {
-            var booking = SelectedBooking;
-            if (booking != null)
-            {
-                _bookingService.CancelBooking(booking.Id);
+            if (SelectedBooking == null) return;
 
-                var toRemove = Bookings.FirstOrDefault(b => b.Id == booking.Id);
-                if (toRemove != null)
-                    Bookings.Remove(toRemove);
+            _bookingService.CancelBooking(SelectedBooking.Id);
+            RemoveBookingFromList(SelectedBooking);
+            _logger.LogInfo($"Booking {SelectedBooking.Id} cancelled.");
+            SelectedBooking = null;
+        }
 
-                _logger.LogInfo($"Booking {booking.Id} cancelled.");
-                SelectedBooking = null;
-            }
+        private void RemoveBookingFromList(Booking booking)
+        {
+            var toRemove = Bookings.FirstOrDefault(b => b.Id == booking.Id);
+            if (toRemove != null)
+                Bookings.Remove(toRemove);
         }
 
         private void ApplyFilter()
@@ -175,44 +161,62 @@ namespace HotelBookingSystem.ViewModels
         {
             try
             {
-                if (!CheckInDate.HasValue || !CheckOutDate.HasValue)
-                {
-                    MessageBox.Show("Будь ласка, виберіть дати заїзду і виїзду.", "Помилка");
+                if (!AreDatesValid() || !IsRoomSelected() || !IsGuestPresent())
                     return;
-                }
 
-                if (SelectedRoomId == 0)
-                {
-                    MessageBox.Show("Будь ласка, виберіть кімнату.", "Помилка");
-                    return;
-                }
-
-                if (CurrentGuest == null)
-                {
-                    MessageBox.Show("Гість не авторизований.", "Помилка");
-                    return;
-                }
-
-                var guestId = CurrentGuest.Id;
-
-
-                var booking = _bookingService.CreateBooking(SelectedRoomId, guestId, CheckInDate.Value, CheckOutDate.Value);
+                var booking = _bookingService.CreateBooking(SelectedRoomId, CurrentGuest!.Id, CheckInDate!.Value, CheckOutDate!.Value);
                 Bookings.Add(booking);
 
                 _logger.LogInfo($"Room {SelectedRoomId} booked from {CheckInDate.Value:d} to {CheckOutDate.Value:d}");
             }
             catch (Exception ex)
             {
-                MessageBox.Show(ex.Message, "Помилка бронювання");
+                ShowError(ex.Message, "Помилка бронювання");
             }
         }
 
-        private bool CanBookRoom()
+        private bool AreDatesValid()
         {
-            var result = SelectedRoomId > 0 && CheckInDate.HasValue && CheckOutDate.HasValue && CheckInDate < CheckOutDate && CurrentGuest != null;
-            return result;
+            if (!CheckInDate.HasValue || !CheckOutDate.HasValue)
+            {
+                ShowError("Будь ласка, виберіть дати заїзду і виїзду.", "Помилка");
+                return false;
+            }
+            return true;
         }
 
+        private bool IsRoomSelected()
+        {
+            if (SelectedRoomId == 0)
+            {
+                ShowError("Будь ласка, виберіть кімнату.", "Помилка");
+                return false;
+            }
+            return true;
+        }
 
+        private bool IsGuestPresent()
+        {
+            if (CurrentGuest == null)
+            {
+                ShowError("Гість не авторизований.", "Помилка");
+                return false;
+            }
+            return true;
+        }
+
+        private void ShowError(string message, string caption) => MessageBox.Show(message, caption);
+
+        private bool CanBookRoom()
+        {
+            return SelectedRoomId > 0 && CheckInDate.HasValue && CheckOutDate.HasValue && CheckInDate < CheckOutDate && CurrentGuest != null;
+        }
+
+        private void RaiseBookRoomCanExecuteChanged() => (BookRoomCommand as RelayCommand)?.RaiseCanExecuteChanged();
+        private void RaiseBookingCommandsCanExecuteChanged()
+        {
+            (CancelBookingCommand as RelayCommand)?.RaiseCanExecuteChanged();
+            (EditBookingCommand as RelayCommand)?.RaiseCanExecuteChanged();
+        }
     }
 }
